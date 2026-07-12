@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Build output (create it with npm run build)
+main.js
+*.map
+
+# Obsidian local workspace and plugin data
+.obsidian/
+data.json
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
