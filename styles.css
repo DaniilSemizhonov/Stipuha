@@ -22,9 +22,14 @@
 .fs-expense { color: var(--color-red); }
 .fs-empty { color: var(--text-muted); padding: 12px 18px 18px; }
 .fs-budget { padding: 12px 18px; border-top: 1px solid var(--background-modifier-border); }
+.fs-goal { padding: 12px 18px; border-top: 1px solid var(--background-modifier-border); }
 .fs-budget-top { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: .92em; }
 .fs-progress { height: 7px; background: var(--background-modifier-border); border-radius: 99px; overflow: hidden; }
 .fs-progress > div { height: 100%; background: var(--interactive-accent); border-radius: inherit; }
 .fs-progress.over > div { background: var(--color-red); }
 .fs-modal-note { color: var(--text-muted); margin: -4px 0 14px; }
+.fs-summary-overview { padding: 4px 18px 12px; border-top: 1px solid var(--background-modifier-border); }
+.fs-summary-total { font-size: 1.3em; font-weight: 600; margin: 8px 0 3px; }
+.fs-insight { display: flex; align-items: center; gap: 9px; padding: 11px 18px; border-top: 1px solid var(--background-modifier-border); color: var(--text-normal); }
+.fs-insight-icon { width: 23px; height: 23px; display: grid; place-items: center; color: var(--interactive-accent); flex: 0 0 auto; }
 @media (max-width: 650px) { .financial-space-view { padding: 16px; } .fs-header { align-items: flex-start; flex-direction: column; } .fs-grid { grid-template-columns: 1fr; } }

@@ -9,11 +9,15 @@ interface Transaction { id: string; kind: TransactionKind; amount: number; categ
 interface Account { id: string; name: string; balance: number; }
 interface Budget { category: string; limit: number; }
 interface PlannedPayment { id: string; title: string; amount: number; day: number; }
+interface ScheduledIncome { id: string; title: string; amount: number; day: number; }
+interface SavingsGoal { id: string; title: string; target: number; saved: number; }
 interface FinancialSpaceSettings {
   accounts: Account[];
   transactions: Transaction[];
   budgets: Budget[];
   plannedPayments: PlannedPayment[];
+  scheduledIncomes: ScheduledIncome[];
+  savingsGoals: SavingsGoal[];
   expectedIncome: number;
   logsFolder: string;
   logFileTemplate: string;
@@ -27,6 +31,8 @@ const DEFAULT_SETTINGS: FinancialSpaceSettings = {
     { category: "Дом", limit: 5000 }, { category: "Развлечения", limit: 4000 }
   ],
   plannedPayments: [],
+  scheduledIncomes: [],
+  savingsGoals: [],
   expectedIncome: 0,
   logsFolder: `${TRANSACTIONS_FOLDER}/{month}`,
   logFileTemplate: "{date}-{kind}-{category}-{id}"
@@ -90,7 +96,12 @@ export default class FinancialSpacePlugin extends Plugin {
 
   async loadSettings() {
     const saved = await this.loadData() as Partial<FinancialSpaceSettings> | null;
-    this.settings = { ...DEFAULT_SETTINGS, ...saved, transactions: saved?.transactions ?? [] };
+    this.settings = {
+      ...DEFAULT_SETTINGS, ...saved,
+      transactions: saved?.transactions ?? [],
+      scheduledIncomes: saved?.scheduledIncomes ?? [],
+      savingsGoals: saved?.savingsGoals ?? []
+    };
   }
   async saveSettings() { await this.saveData(this.settings); this.refreshViews(); }
   async addTransaction(transaction: Transaction) { this.settings.transactions.push(transaction); await this.storage.saveTransaction(transaction, this.settings); await this.saveSettings(); }
@@ -108,7 +119,13 @@ export default class FinancialSpacePlugin extends Plugin {
     const today = new Date().getDate();
     return this.settings.plannedPayments.filter(p => p.day >= today).reduce((sum, p) => sum + p.amount, 0);
   }
-  available() { return this.accountBalance() + this.settings.expectedIncome - this.plannedRemaining(); }
+  scheduledIncomeRemaining() {
+    const today = new Date().getDate();
+    return this.settings.scheduledIncomes.filter(income => income.day >= today).reduce((sum, income) => sum + income.amount, 0);
+  }
+  savingsReserved() { return this.settings.savingsGoals.reduce((sum, goal) => sum + goal.saved, 0); }
+  expectedRemaining() { return this.settings.expectedIncome + this.scheduledIncomeRemaining(); }
+  available() { return this.accountBalance() - this.savingsReserved() + this.expectedRemaining() - this.plannedRemaining(); }
 }
 
 class FinancialSpaceView extends ItemView {
@@ -129,19 +146,24 @@ class FinancialSpaceView extends ItemView {
     const actions = header.createDiv({ cls: "fs-actions" });
     this.button(actions, "arrow-down-circle", "Расход", () => new TransactionModal(this.app, this.plugin, "expense").open());
     this.button(actions, "arrow-up-circle", "Доход", () => new TransactionModal(this.app, this.plugin, "income").open());
+    if (this.plugin.settings.savingsGoals.length) this.button(actions, "piggy-bank", "Отложить", () => new SavingsContributionModal(this.app, this.plugin).open());
 
     const available = this.plugin.available();
     const days = Math.max(1, new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate() - new Date().getDate() + 1);
     const hero = el.createDiv({ cls: "fs-hero" });
     hero.createDiv({ text: "Доступно до конца месяца", cls: "fs-eyebrow" });
     hero.createDiv({ text: money(available), cls: "fs-available" });
-    hero.createDiv({ text: `Это примерно ${money(available / days)} в день · осталось ${days} дн.`, cls: "fs-hint" });
+    const nextIncome = this.plugin.settings.scheduledIncomes.filter(income => income.day >= new Date().getDate()).sort((a, b) => a.day - b.day)[0];
+    const incomeHint = nextIncome ? ` · ${nextIncome.title} ${nextIncome.day}-го: ${money(nextIncome.amount)}` : "";
+    hero.createDiv({ text: `Это примерно ${money(available / days)} в день · осталось ${days} дн.${incomeHint}`, cls: "fs-hint" });
 
     const grid = el.createDiv({ cls: "fs-grid" });
     this.stat(grid, "На счетах", money(this.plugin.accountBalance()));
     this.stat(grid, "Запланировано", money(this.plugin.plannedRemaining()));
-    this.stat(grid, "Ожидаемые доходы", money(this.plugin.settings.expectedIncome));
+    this.stat(grid, "Ожидаемые поступления", money(this.plugin.expectedRemaining()));
     this.renderBudgets(el);
+    this.renderMonthlySummary(el);
+    this.renderSavingsGoals(el);
     this.renderTransactions(el);
   }
   stat(parent: HTMLElement, label: string, value: string) { const card = parent.createDiv({ cls: "fs-card" }); card.createDiv({ text: label, cls: "fs-card-label" }); card.createDiv({ text: value, cls: "fs-card-value" }); }
@@ -156,6 +178,43 @@ class FinancialSpaceView extends ItemView {
       const progress = item.createDiv({ cls: `fs-progress ${spent > budget.limit ? "over" : ""}` }); progress.createDiv().style.width = `${percent}%`;
     }
     if (!this.plugin.settings.budgets.length) section.createDiv({ text: "Добавьте бюджеты в настройках плагина.", cls: "fs-empty" });
+  }
+  renderMonthlySummary(parent: HTMLElement) {
+    const month = this.plugin.currentTransactions();
+    const expenses = month.filter(t => t.kind === "expense");
+    const income = month.filter(t => t.kind === "income").reduce((sum, t) => sum + t.amount, 0);
+    const spent = expenses.reduce((sum, t) => sum + t.amount, 0);
+    const section = parent.createDiv({ cls: "fs-section" }); section.createDiv({ text: "Итоги месяца", cls: "fs-section-title" });
+    if (!month.length) { section.createDiv({ text: "Добавьте несколько операций — здесь появятся понятные выводы о месяце.", cls: "fs-empty" }); return; }
+    const overview = section.createDiv({ cls: "fs-summary-overview" });
+    overview.createDiv({ text: `Потрачено ${money(spent)}`, cls: "fs-summary-total" });
+    overview.createDiv({ text: income ? `Поступило ${money(income)}` : "Поступлений пока нет", cls: "fs-row-meta" });
+    const byCategory = new Map<string, number>();
+    expenses.forEach(t => byCategory.set(t.category, (byCategory.get(t.category) ?? 0) + t.amount));
+    const top = [...byCategory.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (top) this.insight(section, "chart-no-axes-combined", `Больше всего ушло на «${top[0]}» — ${money(top[1])}.`);
+    const overBudget = this.plugin.settings.budgets.map(budget => ({ budget, spent: byCategory.get(budget.category) ?? 0 })).find(({ budget, spent }) => spent > budget.limit);
+    if (overBudget) this.insight(section, "triangle-alert", `Лимит «${overBudget.budget.category}» превышен на ${money(overBudget.spent - overBudget.budget.limit)}.`);
+    else if (this.plugin.settings.budgets.length) {
+      const totalBudget = this.plugin.settings.budgets.reduce((sum, budget) => sum + budget.limit, 0);
+      const spentInBudgetedCategories = this.plugin.settings.budgets.reduce((sum, budget) => sum + (byCategory.get(budget.category) ?? 0), 0);
+      this.insight(section, "circle-check", `В рамках категорий с лимитами осталось ${money(Math.max(0, totalBudget - spentInBudgetedCategories))}.`);
+    }
+  }
+  insight(parent: HTMLElement, icon: string, text: string) {
+    const row = parent.createDiv({ cls: "fs-insight" }); const iconEl = row.createDiv({ cls: "fs-insight-icon" }); setIcon(iconEl, icon); row.createSpan({ text });
+  }
+  renderSavingsGoals(parent: HTMLElement) {
+    const goals = this.plugin.settings.savingsGoals;
+    if (!goals.length) return;
+    const section = parent.createDiv({ cls: "fs-section" }); section.createDiv({ text: "Накопления", cls: "fs-section-title" });
+    for (const goal of goals) {
+      const progress = goal.target ? Math.min(100, goal.saved / goal.target * 100) : 0;
+      const item = section.createDiv({ cls: "fs-goal" }); const top = item.createDiv({ cls: "fs-budget-top" });
+      top.createSpan({ text: goal.title }); top.createSpan({ text: `${money(goal.saved)} из ${money(goal.target)}` });
+      const bar = item.createDiv({ cls: "fs-progress" }); bar.createDiv().style.width = `${progress}%`;
+      item.createDiv({ text: goal.saved >= goal.target ? "Цель достигнута — можно выбрать следующую." : `Осталось ${money(goal.target - goal.saved)}. Эти деньги не входят в доступную сумму.`, cls: "fs-row-meta" });
+    }
   }
   renderTransactions(parent: HTMLElement) {
     const section = parent.createDiv({ cls: "fs-section" }); section.createDiv({ text: "Последние операции", cls: "fs-section-title" });
@@ -202,7 +261,7 @@ class FinancialSpaceSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this; containerEl.empty(); containerEl.createEl("h2", { text: "Финансовое пространство" });
     containerEl.createEl("h3", { text: "Настройка прогноза" });
-    new Setting(containerEl).setName("Ожидаемые доходы в этом месяце").setDesc("Доходы, которые ещё не пришли, но уже ожидаются.").addText(input => input.setValue(String(this.plugin.settings.expectedIncome || "")).onChange(async v => { this.plugin.settings.expectedIncome = Number(v) || 0; await this.plugin.saveSettings(); }));
+    new Setting(containerEl).setName("Разовые ожидаемые доходы").setDesc("Доходы, которые ещё не пришли в этом месяце и не повторяются по расписанию.").addText(input => input.setValue(String(this.plugin.settings.expectedIncome || "")).onChange(async v => { this.plugin.settings.expectedIncome = Number(v) || 0; await this.plugin.saveSettings(); }));
     containerEl.createEl("h3", { text: "Markdown-журнал операций" });
     new Setting(containerEl).setName("Папка для журнала").setDesc("Путь относительно vault. Можно использовать {month}, например: Финансовое пространство/Операции/{month}").addText(input => input.setValue(this.plugin.settings.logsFolder).onChange(async value => { this.plugin.settings.logsFolder = value.trim() || DEFAULT_SETTINGS.logsFolder; await this.plugin.saveSettings(); }));
     new Setting(containerEl).setName("Шаблон имени файла").setDesc("Переменные: {date}, {month}, {kind}, {category}, {account}, {amount}, {id}. Расширение .md добавляется автоматически.").addText(input => { input.inputEl.style.width = "100%"; input.setValue(this.plugin.settings.logFileTemplate).onChange(async value => { this.plugin.settings.logFileTemplate = value.trim() || DEFAULT_SETTINGS.logFileTemplate; await this.plugin.saveSettings(); }); });
@@ -216,6 +275,14 @@ class FinancialSpaceSettingTab extends PluginSettingTab {
     containerEl.createDiv({ text: "Будущие платежи вычитаются из доступной суммы до конца месяца.", cls: "setting-item-description" });
     this.plugin.settings.plannedPayments.forEach((payment, index) => new Setting(containerEl).setName(payment.title).setDesc(`${money(payment.amount)} · ${payment.day}-го числа`).addButton(b => b.setButtonText("Удалить").setWarning().onClick(async () => { this.plugin.settings.plannedPayments.splice(index, 1); await this.plugin.saveSettings(); this.display(); })));
     new Setting(containerEl).addButton(b => b.setButtonText("Добавить регулярный платёж").onClick(() => new PlannedPaymentModal(this.app, this.plugin).open()));
+    containerEl.createEl("h3", { text: "Поступления по расписанию" });
+    containerEl.createDiv({ text: "Например, стипендия, подработка или регулярная помощь. Будущие поступления учитываются в прогнозе.", cls: "setting-item-description" });
+    this.plugin.settings.scheduledIncomes.forEach((income, index) => new Setting(containerEl).setName(income.title).setDesc(`${money(income.amount)} · ${income.day}-го числа`).addButton(b => b.setButtonText("Удалить").setWarning().onClick(async () => { this.plugin.settings.scheduledIncomes.splice(index, 1); await this.plugin.saveSettings(); this.display(); })));
+    new Setting(containerEl).addButton(b => b.setButtonText("Добавить поступление").onClick(() => new ScheduledIncomeModal(this.app, this.plugin).open()));
+    containerEl.createEl("h3", { text: "Накопления" });
+    containerEl.createDiv({ text: "Отложенные на цель деньги вычитаются из доступной суммы, но остаются на вашем счёте.", cls: "setting-item-description" });
+    this.plugin.settings.savingsGoals.forEach((goal, index) => new Setting(containerEl).setName(goal.title).setDesc(`${money(goal.saved)} из ${money(goal.target)}`).addButton(b => b.setButtonText("Удалить").setWarning().onClick(async () => { this.plugin.settings.savingsGoals.splice(index, 1); await this.plugin.saveSettings(); this.display(); })));
+    new Setting(containerEl).addButton(b => b.setButtonText("Добавить цель").onClick(() => new SavingsGoalModal(this.app, this.plugin).open()));
   }
 }
 
@@ -233,6 +300,58 @@ class PlannedPaymentModal extends Modal {
       if (!this.title.trim() || amount <= 0 || !Number.isInteger(day) || day < 1 || day > 31) { new Notice("Заполните название, сумму и день от 1 до 31"); return; }
       this.plugin.settings.plannedPayments.push({ id: crypto.randomUUID(), title: this.title.trim(), amount, day });
       await this.plugin.saveSettings(); this.close();
+    }));
+  }
+}
+
+class ScheduledIncomeModal extends Modal {
+  private title = ""; private amount = ""; private day = "";
+  constructor(app: App, private plugin: FinancialSpacePlugin) { super(app); }
+  onOpen() {
+    const { contentEl } = this; contentEl.createEl("h2", { text: "Поступление по расписанию" });
+    contentEl.createDiv({ text: "Например: стипендия 25-го числа или доход от подработки.", cls: "fs-modal-note" });
+    new Setting(contentEl).setName("Название").addText(i => i.setPlaceholder("Стипендия").onChange(v => this.title = v));
+    new Setting(contentEl).setName("Сумма, ₽").addText(i => i.setPlaceholder("0").onChange(v => this.amount = v));
+    new Setting(contentEl).setName("День месяца").addText(i => { i.inputEl.type = "number"; i.setPlaceholder("1–31").onChange(v => this.day = v); });
+    new Setting(contentEl).addButton(b => b.setButtonText("Сохранить").setCta().onClick(async () => {
+      const amount = Number(this.amount.replace(",", ".")); const day = Number(this.day);
+      if (!this.title.trim() || amount <= 0 || !Number.isInteger(day) || day < 1 || day > 31) { new Notice("Заполните название, сумму и день от 1 до 31"); return; }
+      this.plugin.settings.scheduledIncomes.push({ id: crypto.randomUUID(), title: this.title.trim(), amount, day });
+      await this.plugin.saveSettings(); this.close();
+    }));
+  }
+}
+
+class SavingsGoalModal extends Modal {
+  private title = ""; private target = "";
+  constructor(app: App, private plugin: FinancialSpacePlugin) { super(app); }
+  onOpen() {
+    const { contentEl } = this; contentEl.createEl("h2", { text: "Цель накопления" });
+    contentEl.createDiv({ text: "Деньги, отложенные на цель, не будут учитываться в дневном лимите.", cls: "fs-modal-note" });
+    new Setting(contentEl).setName("Цель").addText(i => i.setPlaceholder("Ноутбук").onChange(v => this.title = v));
+    new Setting(contentEl).setName("Сумма, ₽").addText(i => i.setPlaceholder("0").onChange(v => this.target = v));
+    new Setting(contentEl).addButton(b => b.setButtonText("Создать цель").setCta().onClick(async () => {
+      const target = Number(this.target.replace(",", "."));
+      if (!this.title.trim() || target <= 0) { new Notice("Укажите название и сумму цели"); return; }
+      this.plugin.settings.savingsGoals.push({ id: crypto.randomUUID(), title: this.title.trim(), target, saved: 0 });
+      await this.plugin.saveSettings(); this.close();
+    }));
+  }
+}
+
+class SavingsContributionModal extends Modal {
+  private goal = ""; private amount = "";
+  constructor(app: App, private plugin: FinancialSpacePlugin) { super(app); this.goal = plugin.settings.savingsGoals[0]?.id ?? ""; }
+  onOpen() {
+    const { contentEl } = this; contentEl.createEl("h2", { text: "Отложить на цель" });
+    contentEl.createDiv({ text: "Сумма останется на счёте, но больше не будет считаться доступной для трат.", cls: "fs-modal-note" });
+    new Setting(contentEl).setName("Цель").addDropdown(dropdown => { this.plugin.settings.savingsGoals.forEach(goal => dropdown.addOption(goal.id, goal.title)); dropdown.setValue(this.goal).onChange(v => this.goal = v); });
+    new Setting(contentEl).setName("Сумма, ₽").addText(i => i.setPlaceholder("0").onChange(v => this.amount = v));
+    new Setting(contentEl).addButton(b => b.setButtonText("Отложить").setCta().onClick(async () => {
+      const amount = Number(this.amount.replace(",", ".")); const goal = this.plugin.settings.savingsGoals.find(item => item.id === this.goal);
+      if (!goal || amount <= 0) { new Notice("Введите сумму больше нуля"); return; }
+      if (amount > this.plugin.available()) { new Notice("Для этой суммы недостаточно доступных денег"); return; }
+      goal.saved = Math.min(goal.target, goal.saved + amount); await this.plugin.saveSettings(); this.close();
     }));
   }
 }
